@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Drawing.Text;
 using System.Runtime.InteropServices;
+using System.Security;
 using Microsoft.Win32;
 
 namespace OP1wBattery;
@@ -37,6 +38,7 @@ internal sealed class TrayApp : ApplicationContext
     readonly NotifyIcon _notifyIcon;
     readonly ContextMenuStrip _menu;
     readonly ToolStripMenuItem _statusItem;
+    readonly ToolStripMenuItem _refreshItem;
     readonly ToolStripMenuItem _startupItem;
     readonly System.Windows.Forms.Timer _pollTimer;
     readonly int _iconSize;
@@ -57,11 +59,11 @@ internal sealed class TrayApp : ApplicationContext
 
         _statusItem = new ToolStripMenuItem { Enabled = false };
 
-        var refreshItem = new ToolStripMenuItem("Refresh now");
-        refreshItem.Click += async (_, _) => await RefreshAsync();
+        _refreshItem = new ToolStripMenuItem("Refresh now");
+        _refreshItem.Click += async (_, _) => await RefreshAsync();
 
         _startupItem = new ToolStripMenuItem("Start with Windows");
-        _startupItem.Click += (_, _) => SetStartupEnabled(!IsStartupEnabled());
+        _startupItem.Click += (_, _) => ToggleStartup();
 
         var exitItem = new ToolStripMenuItem("Exit");
         exitItem.Click += (_, _) => ExitApp();
@@ -70,7 +72,7 @@ internal sealed class TrayApp : ApplicationContext
         _menu.Items.AddRange([
             _statusItem,
             new ToolStripSeparator(),
-            refreshItem,
+            _refreshItem,
             _startupItem,
             new ToolStripSeparator(),
             exitItem,
@@ -93,13 +95,20 @@ internal sealed class TrayApp : ApplicationContext
     {
         if (_busy || _exiting) return;
         _busy = true;
+        // Stop the timer for the duration of the read: it is re-armed by
+        // RescheduleTimer below, and without this the startup poll (which
+        // starts at a 1 ms interval) keeps firing no-op ticks while the
+        // synchronous HID wait runs.
+        _pollTimer.Stop();
+        _refreshItem.Enabled = false; // a click during the read would no-op anyway
         try
         {
             _reading = await Task.Run(MouseBattery.Read);
         }
-        catch
+        catch (Exception ex)
         {
             // Never let a bad read take the tray down; show "?" and try again.
+            DebugLog.Write($"read threw: {ex.GetType().Name}: {ex.Message}");
             _reading = null;
         }
         finally
@@ -108,6 +117,7 @@ internal sealed class TrayApp : ApplicationContext
         }
 
         if (_exiting) return;
+        _refreshItem.Enabled = true;
         try
         {
             OnReadingUpdated();
@@ -157,15 +167,31 @@ internal sealed class TrayApp : ApplicationContext
         var text = _reading is { } r ? r.Percent.ToString() : "?";
         var icon = RenderIcon(text, IconColor(_reading), _iconSize, out var handle);
 
+        var previousIcon = _notifyIcon.Icon;
         var previousHandle = _iconHandle;
-        _notifyIcon.Icon = icon;
+        try
+        {
+            _notifyIcon.Icon = icon;
+        }
+        catch
+        {
+            // The setter stores the icon on the NotifyIcon before it updates
+            // the shell, so on failure the tray is left holding the icon we
+            // are about to free: put the previous one back first.
+            _notifyIcon.Icon = previousIcon;
+            icon.Dispose();
+            DestroyIcon(handle);
+            throw;
+        }
         _iconHandle = handle;
         _notifyIcon.Text = $"{AppName}\n{StatusLine(_reading)}";
 
         // Shell_NotifyIcon (called above, inside the Icon setter) copies the
         // icon for its own use, so the handle we just swapped out is safe to
-        // free immediately.
+        // free immediately. Icon.FromHandle wrappers do not own their HICON,
+        // but disposing the old wrapper keeps it out of the finalizer queue.
         if (previousHandle != IntPtr.Zero) DestroyIcon(previousHandle);
+        previousIcon?.Dispose();
     }
 
     static Icon RenderIcon(string text, int rgb, int size, out IntPtr handle)
@@ -232,8 +258,12 @@ internal sealed class TrayApp : ApplicationContext
     {
         if (reading is not { } r) return ColorUnknown;
         if (r.Wired) return ColorWired;
-        return LevelColors.First(level => r.Percent <= level.Limit).Rgb;
+        return ColorForPercent(r.Percent);
     }
+
+    /// <summary>The level colour for a percentage; pure, so tests can hit it.</summary>
+    internal static int ColorForPercent(int percent) =>
+        LevelColors.First(level => percent <= level.Limit).Rgb;
 
     static string StatusLine(Reading? reading)
     {
@@ -250,7 +280,29 @@ internal sealed class TrayApp : ApplicationContext
     void OnMenuOpening(object? sender, CancelEventArgs e)
     {
         _statusItem.Text = StatusLine(_reading);
-        _startupItem.Checked = IsStartupEnabled();
+        try
+        {
+            _startupItem.Checked = IsStartupEnabled();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or SecurityException)
+        {
+            // A locked-down Run key must not break the menu; leave the
+            // checkbox showing whatever it showed last time.
+        }
+    }
+
+    void ToggleStartup()
+    {
+        try
+        {
+            SetStartupEnabled(!IsStartupEnabled());
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
+                                   or SecurityException or InvalidOperationException)
+        {
+            MessageBox.Show($"Could not update the Run key:\n{ex.Message}", AppName,
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     void ExitApp()
@@ -268,7 +320,9 @@ internal sealed class TrayApp : ApplicationContext
         if (disposing)
         {
             _pollTimer.Dispose();
+            var lastIcon = _notifyIcon.Icon;
             _notifyIcon.Dispose();
+            lastIcon?.Dispose(); // the FromHandle wrapper; the HICON goes below
             _menu.Dispose();
             if (_iconHandle != IntPtr.Zero)
             {

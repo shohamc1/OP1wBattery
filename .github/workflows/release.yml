@@ -21,11 +21,28 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
+      # run_number alone collides when a failed run is re-run (the tag already
+      # exists), so reruns get a suffix: v0.0.5, then v0.0.5-r2, and so on.
+      - name: Compute version
+        id: version
+        shell: pwsh
+        run: |
+          $v = "0.0.${{ github.run_number }}"
+          if ("${{ github.run_attempt }}" -ne "1") { $v += "-r${{ github.run_attempt }}" }
+          "value=$v" >> $env:GITHUB_OUTPUT
+
+      # The app is restored last so its assets file keeps the win-x64 runtime
+      # target that publish --no-restore needs.
       - name: Restore dependencies
-        run: dotnet restore OP1wBattery.csproj --runtime win-x64
+        run: |
+          dotnet restore OP1wBattery.Tests/OP1wBattery.Tests.csproj
+          dotnet restore OP1wBattery.csproj --runtime win-x64
 
       - name: Build
-        run: dotnet build OP1wBattery.csproj --configuration Release --no-restore
+        run: dotnet build OP1wBattery.csproj --configuration Release --no-restore -p:Version=${{ steps.version.outputs.value }}
+
+      - name: Test
+        run: dotnet test OP1wBattery.Tests/OP1wBattery.Tests.csproj --configuration Release --no-restore
 
       - name: Publish executable
         run: >-
@@ -35,15 +52,16 @@ jobs:
           --self-contained false
           --no-restore
           -p:PublishSingleFile=true
+          -p:Version=${{ steps.version.outputs.value }}
           --output publish
 
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: >-
-          gh release create "v0.0.${{ github.run_number }}"
+          gh release create "v${{ steps.version.outputs.value }}"
           "publish/OP1wBattery.exe"
           --target "${{ github.sha }}"
-          --title "OP1w Battery v0.0.${{ github.run_number }}"
+          --title "OP1w Battery v${{ steps.version.outputs.value }}"
           --notes "This smaller build requires the .NET 10 Desktop Runtime for Windows. The runtime is not included."
           --generate-notes

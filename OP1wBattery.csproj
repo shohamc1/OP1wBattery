@@ -8,7 +8,15 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyTitle>OP1w Battery</AssemblyTitle>
+    <Description>System tray battery indicator for the Endgame Gear OP1w 4k v2</Description>
     <RootNamespace>OP1wBattery</RootNamespace>
   </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="OP1wBattery.Tests" />
+    <!-- SDK projects compile **/*.cs recursively, so without this the app
+         would try to build the xUnit test sources below it. -->
+    <Compile Remove="OP1wBattery.Tests/**/*.cs" />
+  </ItemGroup>
 
 </Project>

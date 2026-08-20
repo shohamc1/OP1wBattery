@@ -40,6 +40,8 @@ internal static class MouseBattery
     const byte StatusReady = 1;
     const byte StatusBusy = 3;
 
+    const int HidpStatusSuccess = 0x00110000;
+
     const byte CommandBattery = 0xB4;
 
     const uint GenericReadWrite = 0xC0000000;
@@ -49,20 +51,37 @@ internal static class MouseBattery
     /// <summary>Take one reading, or null if the mouse is absent or asleep.</summary>
     public static Reading? Read()
     {
-        var device = OpenControlInterface();
-        if (device is null) return null;
+        var candidates = OpenControlInterfaces();
+        if (candidates.Count == 0)
+        {
+            DebugLog.Write("no control interface present");
+            return null;
+        }
 
-        using var handle = device.Value.Handle;
-        var payload = SendCommand(handle, CommandBattery);
-        if (payload is null) return null;
-
-        // The mouse enumerates under its own PID when cabled, which is how the
-        // vendor tool decides to show "Charging".
-        return new Reading(
-            Percent: Math.Min((int)payload[0], 100),
-            Millivolts: payload[1] | payload[2] << 8,
-            Wired: device.Value.ProductId == WiredPid);
+        try
+        {
+            foreach (var candidate in candidates)
+            {
+                var payload = SendCommand(candidate.Handle, CommandBattery);
+                if (payload is null) continue; // asleep or gone: try the next interface
+                return ParseBatteryPayload(payload, wired: candidate.ProductId == WiredPid);
+            }
+            return null;
+        }
+        finally
+        {
+            foreach (var candidate in candidates) candidate.Handle.Dispose();
+        }
     }
+
+    /// <summary>
+    /// Percent and cell millivolts from a 0xB4 payload. Pure, so tests can hit
+    /// it without a mouse.
+    /// </summary>
+    internal static Reading ParseBatteryPayload(byte[] payload, bool wired) =>
+        new(Percent: Math.Min((int)payload[0], 100),
+            Millivolts: payload[1] | payload[2] << 8,
+            Wired: wired);
 
     /// <summary>Send a vendor command and return its payload, or null on failure.</summary>
     static byte[]? SendCommand(SafeFileHandle handle, byte command,
@@ -71,7 +90,11 @@ internal static class MouseBattery
         var request = new byte[ReportLength];
         request[0] = ReportId;
         request[1] = command;
-        if (!HidD_SetFeature(handle, request, ReportLength)) return null;
+        if (!HidD_SetFeature(handle, request, ReportLength))
+        {
+            DebugLog.Write($"cmd 0x{command:X2}: SetFeature failed");
+            return null;
+        }
 
         Thread.Sleep(settleMs);
 
@@ -80,20 +103,39 @@ internal static class MouseBattery
         {
             var response = new byte[ReportLength];
             response[0] = ReportId;
-            if (!HidD_GetFeature(handle, response, ReportLength)) return null;
+            if (!HidD_GetFeature(handle, response, ReportLength))
+            {
+                DebugLog.Write($"cmd 0x{command:X2}: GetFeature failed");
+                return null;
+            }
 
             if (response[1] == StatusReady) return response[PayloadAt..];
-            if (response[1] != StatusBusy) return null;
+            if (response[1] != StatusBusy)
+            {
+                DebugLog.Write($"cmd 0x{command:X2}: unexpected status {response[1]}");
+                return null;
+            }
 
-            Thread.Sleep(retryMs);
-            retryMs += 200;
+            if (attempt < retries) // no point sleeping after the final attempt
+            {
+                Thread.Sleep(retryMs);
+                retryMs += 200;
+            }
         }
+
+        DebugLog.Write($"cmd 0x{command:X2}: still busy after {retries + 1} attempts");
         return null;
     }
 
-    /// <summary>Open the vendor control interface, or null if it is not present.</summary>
-    static (SafeFileHandle Handle, ushort ProductId)? OpenControlInterface()
+    /// <summary>
+    /// Every vendor control interface currently present, wired first: when the
+    /// mouse charges over cable with the dongle still plugged in, both are
+    /// present and the wired interface is the one that reflects the mouse.
+    /// The caller owns the handles and must dispose them all.
+    /// </summary>
+    static List<(SafeFileHandle Handle, ushort ProductId)> OpenControlInterfaces()
     {
+        var candidates = new List<(SafeFileHandle Handle, ushort ProductId)>();
         foreach (var path in HidInterfacePaths())
         {
             var productId = ProductIdIn(path);
@@ -102,10 +144,11 @@ internal static class MouseBattery
             var handle = CreateFileW(path, GenericReadWrite, ShareReadWrite,
                                      IntPtr.Zero, OpenExisting, 0, IntPtr.Zero);
             if (handle.IsInvalid) continue;
-            if (IsControlInterface(handle)) return (handle, productId.Value);
-            handle.Dispose();
+            if (IsControlInterface(handle)) candidates.Add((handle, productId.Value));
+            else handle.Dispose();
         }
-        return null;
+
+        return candidates.OrderByDescending(c => c.ProductId == WiredPid).ToList();
     }
 
     static ushort? ProductIdIn(string devicePath)
@@ -126,7 +169,9 @@ internal static class MouseBattery
             // HIDP_CAPS is 64 bytes and starts with Usage then UsagePage; the
             // rest is report lengths and counts we have no use for.
             var caps = new ushort[32];
-            HidP_GetCaps(preparsed, caps);
+            // HidP_GetCaps returns an NTSTATUS: HIDP_STATUS_SUCCESS is
+            // 0x00110000, not 0.
+            if (HidP_GetCaps(preparsed, caps) != HidpStatusSuccess) return false;
             return caps[0] == ControlUsage && caps[1] == ControlUsagePage;
         }
         finally

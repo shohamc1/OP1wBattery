@@ -28,6 +28,13 @@ Grab `OP1wBattery.exe` from the [latest release](../../releases/latest) and run
 it. The small release executable does not include .NET. Install the [.NET 10
 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) first.
 
+## Diagnostics
+
+If the tray shows `?` and you want to know why, set the `OP1WBATTERY_DEBUG`
+environment variable to any value before starting the app. Read failures are
+then appended to `%TEMP%\OP1wBattery-debug.log`. With the variable unset the
+app never touches the disk.
+
 ## Build
 
 Needs the .NET 10 SDK.
@@ -37,6 +44,12 @@ dotnet build -c Release
 ```
 
 The executable lands in `bin\Release\net10.0-windows\OP1wBattery.exe`.
+
+Run the tests:
+
+```bash
+dotnet test OP1wBattery.Tests
+```
 
 To create the same small, framework-dependent executable as the release:
 
