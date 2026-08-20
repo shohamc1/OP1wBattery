@@ -2,10 +2,13 @@ using Xunit;
 
 namespace OP1wBattery.Tests;
 
-/// <summary>The tray tooltip, which NotifyIcon.Text caps at 63 characters.</summary>
+/// <summary>
+/// The tray tooltip, which NotifyIcon.Text caps at 127 characters on modern
+/// .NET (szTip is 128 WCHARs; 63 was the .NET Framework limit).
+/// </summary>
 public class TooltipTests
 {
-    const int MaxLength = 63;
+    const int MaxLength = 127;
 
     [Theory]
     [InlineData(0)]

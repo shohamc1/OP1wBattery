@@ -136,19 +136,30 @@ internal static class MouseBattery
     static List<(SafeFileHandle Handle, ushort ProductId)> OpenControlInterfaces()
     {
         var candidates = new List<(SafeFileHandle Handle, ushort ProductId)>();
-        foreach (var path in HidInterfacePaths())
+        try
         {
-            var productId = ProductIdIn(path);
-            if (productId is null) continue;
+            foreach (var path in HidInterfacePaths())
+            {
+                var productId = ProductIdIn(path);
+                if (productId is null) continue;
 
-            var handle = CreateFileW(path, GenericReadWrite, ShareReadWrite,
-                                     IntPtr.Zero, OpenExisting, 0, IntPtr.Zero);
-            if (handle.IsInvalid) continue;
-            if (IsControlInterface(handle)) candidates.Add((handle, productId.Value));
-            else handle.Dispose();
+                var handle = CreateFileW(path, GenericReadWrite, ShareReadWrite,
+                                         IntPtr.Zero, OpenExisting, 0, IntPtr.Zero);
+                if (handle.IsInvalid) continue;
+                if (IsControlInterface(handle)) candidates.Add((handle, productId.Value));
+                else handle.Dispose();
+            }
+
+            return candidates.OrderByDescending(c => c.ProductId == WiredPid).ToList();
         }
-
-        return candidates.OrderByDescending(c => c.ProductId == WiredPid).ToList();
+        catch
+        {
+            // A throw mid-loop would otherwise strand every handle opened so
+            // far on the finalizer queue: the caller only sees the list once
+            // it is returned.
+            foreach (var candidate in candidates) candidate.Handle.Dispose();
+            throw;
+        }
     }
 
     static ushort? ProductIdIn(string devicePath)
@@ -183,15 +194,25 @@ internal static class MouseBattery
     /// <summary>Device paths of every HID interface currently present.</summary>
     static IEnumerable<string> HidInterfacePaths()
     {
+        // A device arriving between the size call and the list call makes the
+        // buffer too small; the docs say to call the pair in a loop for exactly
+        // that race, so retry a couple of times before giving up.
+        const int CrBufferSmall = 26;
+
         HidD_GetHidGuid(out var hidClass);
-        if (CM_Get_Device_Interface_List_SizeW(out var length, in hidClass, null, 0) != 0)
-            return [];
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            if (CM_Get_Device_Interface_List_SizeW(out var length, in hidClass, null, 0) != 0)
+                return [];
 
-        var buffer = new char[length];
-        if (CM_Get_Device_Interface_ListW(in hidClass, null, buffer, length, 0) != 0)
-            return [];
-
-        return new string(buffer).Split('\0', StringSplitOptions.RemoveEmptyEntries);
+            var buffer = new char[length];
+            var result = CM_Get_Device_Interface_ListW(in hidClass, null, buffer, length, 0);
+            if (result == 0)
+                return new string(buffer).Split('\0', StringSplitOptions.RemoveEmptyEntries);
+            if (result != CrBufferSmall)
+                return [];
+        }
+        return [];
     }
 
     [DllImport("hid.dll")]

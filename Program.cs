@@ -21,8 +21,9 @@ internal static class Program
         }
         catch (UnauthorizedAccessException)
         {
-            // The mutex exists but is owned by another session: treat that as
-            // "already running" and leave quietly.
+            // The mutex exists in this session but under a different security
+            // context (e.g. an elevated instance), so it cannot be opened:
+            // treat that as "already running" and leave quietly.
             return;
         }
         catch (WaitHandleCannotBeOpenedException ex)

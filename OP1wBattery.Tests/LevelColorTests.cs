@@ -19,6 +19,8 @@ public class LevelColorTests
     [InlineData(50, Yellow)]
     [InlineData(51, Green)]
     [InlineData(100, Green)]
+    [InlineData(101, Green)]   // out-of-range readings fall back to the top colour
+    [InlineData(255, Green)]
     public void PercentMapsToExpectedColor(int percent, int expectedRgb)
     {
         Assert.Equal(expectedRgb, TrayApp.ColorForPercent(percent));

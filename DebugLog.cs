@@ -12,13 +12,19 @@ internal static class DebugLog
             ? null
             : Path.Combine(Path.GetTempPath(), "OP1wBattery-debug.log");
 
+    // Writes come from both the UI thread and the thread-pool read;
+    // AppendAllText opens the file without write sharing, so unserialized
+    // concurrent writes would throw (and silently drop lines) below.
+    static readonly object Gate = new();
+
     public static void Write(string message)
     {
         if (LogFile is null) return;
         try
         {
-            File.AppendAllText(LogFile,
-                $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {message}{Environment.NewLine}");
+            lock (Gate)
+                File.AppendAllText(LogFile,
+                    $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {message}{Environment.NewLine}");
         }
         catch
         {

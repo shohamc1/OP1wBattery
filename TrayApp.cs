@@ -19,7 +19,7 @@ internal sealed class TrayApp : ApplicationContext
     const int PollSecondsLow = 120;  // polling interval while the battery is low
     const int LowPollPercent = 15;   // poll faster at or below this level
     const float MinimumFontSize = 5f;
-    const int MaxTooltipLength = 63; // NotifyIcon.Text throws above this
+    const int MaxTooltipLength = 127; // NotifyIcon.Text throws above this (szTip is 128 WCHARs)
 
     const string AppName = "OP1w Battery";
     const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -45,6 +45,8 @@ internal sealed class TrayApp : ApplicationContext
     readonly int _iconSize;
 
     IntPtr _iconHandle;   // the HICON currently shown; ours to destroy
+    string? _renderedText; // what the current icon shows; skips redundant renders
+    int _renderedRgb;
     Reading? _reading;
     bool _busy;
     bool _warned;
@@ -125,9 +127,11 @@ internal sealed class TrayApp : ApplicationContext
         }
         catch (Exception ex)
         {
-            // Rendering or the shell failing must not stop the poll loop, so the
-            // timer is rescheduled below whatever happened above.
+            // Rendering or the shell failing must not stop the poll loop.
             DebugLog.Write($"update failed: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
             RescheduleTimer();
         }
     }
@@ -149,8 +153,6 @@ internal sealed class TrayApp : ApplicationContext
                     $"The OP1w is at {r.Percent}%. Time to charge it.", ToolTipIcon.Warning);
             }
         }
-
-        RescheduleTimer();
     }
 
     /// <summary>Arms the next poll. Always reached, so polling cannot stall.</summary>
@@ -167,33 +169,47 @@ internal sealed class TrayApp : ApplicationContext
     void UpdateIcon()
     {
         var text = _reading is { } r ? r.Percent.ToString() : "?";
-        var icon = RenderIcon(text, IconColor(_reading), _iconSize, out var handle);
+        var rgb = IconColor(_reading);
 
-        var previousIcon = _notifyIcon.Icon;
-        var previousHandle = _iconHandle;
-        try
+        // Only re-render when the visible icon would actually change; the
+        // common poll leaves the percentage (and so the icon) as it was.
+        if (text != _renderedText || rgb != _renderedRgb)
         {
-            _notifyIcon.Icon = icon;
+            var icon = RenderIcon(text, rgb, _iconSize, out var handle);
+
+            var previousIcon = _notifyIcon.Icon;
+            var previousHandle = _iconHandle;
+            try
+            {
+                _notifyIcon.Icon = icon;
+            }
+            catch
+            {
+                // The setter stores the icon on the NotifyIcon before it updates
+                // the shell, so on failure the tray is left holding the icon we
+                // are about to free: put the previous one back first. The restore
+                // must not mask the original exception or skip the cleanup below.
+                try { _notifyIcon.Icon = previousIcon; }
+                catch { /* keep the original exception */ }
+                icon.Dispose();
+                DestroyIcon(handle);
+                throw;
+            }
+            _iconHandle = handle;
+            _renderedText = text;
+            _renderedRgb = rgb;
+
+            // Shell_NotifyIcon (called above, inside the Icon setter) copies the
+            // icon for its own use, so the handle we just swapped out is safe to
+            // free immediately. Icon.FromHandle wrappers do not own their HICON,
+            // but disposing the old wrapper keeps it out of the finalizer queue.
+            if (previousHandle != IntPtr.Zero) DestroyIcon(previousHandle);
+            previousIcon?.Dispose();
         }
-        catch
-        {
-            // The setter stores the icon on the NotifyIcon before it updates
-            // the shell, so on failure the tray is left holding the icon we
-            // are about to free: put the previous one back first.
-            _notifyIcon.Icon = previousIcon;
-            icon.Dispose();
-            DestroyIcon(handle);
-            throw;
-        }
-        _iconHandle = handle;
+
+        // Always set: the tooltip carries the voltage, which drifts between
+        // polls even while the percentage (and so the icon) stays put.
         _notifyIcon.Text = TooltipFor(_reading);
-
-        // Shell_NotifyIcon (called above, inside the Icon setter) copies the
-        // icon for its own use, so the handle we just swapped out is safe to
-        // free immediately. Icon.FromHandle wrappers do not own their HICON,
-        // but disposing the old wrapper keeps it out of the finalizer queue.
-        if (previousHandle != IntPtr.Zero) DestroyIcon(previousHandle);
-        previousIcon?.Dispose();
     }
 
     static Icon RenderIcon(string text, int rgb, int size, out IntPtr handle)
@@ -227,7 +243,17 @@ internal sealed class TrayApp : ApplicationContext
         // caller is responsible for eventually calling DestroyIcon() on it, or
         // it leaks one GDI icon per poll for as long as the app runs.
         handle = bitmap.GetHicon();
-        return Icon.FromHandle(handle);
+        try
+        {
+            return Icon.FromHandle(handle);
+        }
+        catch
+        {
+            // The caller never sees the handle on a throw, so free it here.
+            DestroyIcon(handle);
+            handle = IntPtr.Zero;
+            throw;
+        }
     }
 
     /// <summary>
@@ -263,15 +289,20 @@ internal sealed class TrayApp : ApplicationContext
         return ColorForPercent(r.Percent);
     }
 
-    /// <summary>The level colour for a percentage; pure, so tests can hit it.</summary>
+    /// <summary>
+    /// The level colour for a percentage; pure, so tests can hit it. Values
+    /// above the top limit fall back to the top colour rather than relying on
+    /// callers to clamp.
+    /// </summary>
     internal static int ColorForPercent(int percent) =>
-        LevelColors.First(level => percent <= level.Limit).Rgb;
+        LevelColors.FirstOrDefault(level => percent <= level.Limit, LevelColors[^1]).Rgb;
 
     /// <summary>
     /// The tray tooltip. NotifyIcon.Text throws an ArgumentOutOfRangeException
-    /// above 63 characters, and the setter is reached from a poll rather than
-    /// from user input, so the length is clamped rather than trusted. Pure, so
-    /// tests can hit it.
+    /// above 127 characters (szTip is 128 WCHARs; the 63-char cap was .NET
+    /// Framework), and the setter is reached from a poll rather than from user
+    /// input, so the length is clamped rather than trusted. Pure, so tests can
+    /// hit it.
     /// </summary>
     internal static string TooltipFor(Reading? reading)
     {
