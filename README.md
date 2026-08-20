@@ -25,8 +25,8 @@ third-party dependencies.
 ## Download
 
 Grab `OP1wBattery.exe` from the [latest release](../../releases/latest) and run
-it. It needs the [.NET 10 desktop
-runtime](https://dotnet.microsoft.com/download/dotnet/10.0).
+it. The small release executable does not include .NET. Install the [.NET 10
+Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) first.
 
 ## Build
 
@@ -38,7 +38,13 @@ dotnet build -c Release
 
 The executable lands in `bin\Release\net10.0-windows\OP1wBattery.exe`.
 
-For a single portable file that runs without the .NET runtime installed:
+To create the same small, framework-dependent executable as the release:
+
+```bash
+dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true
+```
+
+To create a larger, self-contained executable that does not need .NET:
 
 ```bash
 dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true

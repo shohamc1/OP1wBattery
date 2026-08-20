@@ -35,6 +35,9 @@ internal sealed class TrayApp : ApplicationContext
     const int ColorWired = 0x60A5FA; // wired beats the level colour
 
     readonly NotifyIcon _notifyIcon;
+    readonly ContextMenuStrip _menu;
+    readonly ToolStripMenuItem _statusItem;
+    readonly ToolStripMenuItem _startupItem;
     readonly System.Windows.Forms.Timer _pollTimer;
     readonly int _iconSize;
 
@@ -52,9 +55,28 @@ internal sealed class TrayApp : ApplicationContext
         _notifyIcon = new NotifyIcon();
         UpdateIcon(); // shows the "unknown" placeholder until the first read lands
 
-        var menu = new ContextMenuStrip();
-        menu.Opening += OnMenuOpening;
-        _notifyIcon.ContextMenuStrip = menu;
+        _statusItem = new ToolStripMenuItem { Enabled = false };
+
+        var refreshItem = new ToolStripMenuItem("Refresh now");
+        refreshItem.Click += async (_, _) => await RefreshAsync();
+
+        _startupItem = new ToolStripMenuItem("Start with Windows");
+        _startupItem.Click += (_, _) => SetStartupEnabled(!IsStartupEnabled());
+
+        var exitItem = new ToolStripMenuItem("Exit");
+        exitItem.Click += (_, _) => ExitApp();
+
+        _menu = new ContextMenuStrip();
+        _menu.Items.AddRange([
+            _statusItem,
+            new ToolStripSeparator(),
+            refreshItem,
+            _startupItem,
+            new ToolStripSeparator(),
+            exitItem,
+        ]);
+        _menu.Opening += OnMenuOpening;
+        _notifyIcon.ContextMenuStrip = _menu;
         _notifyIcon.Visible = true;
 
         // The first read is driven by the timer rather than called from here, so
@@ -138,7 +160,7 @@ internal sealed class TrayApp : ApplicationContext
         var previousHandle = _iconHandle;
         _notifyIcon.Icon = icon;
         _iconHandle = handle;
-        _notifyIcon.Text = Truncate($"{AppName}\n{StatusLine(_reading)}");
+        _notifyIcon.Text = $"{AppName}\n{StatusLine(_reading)}";
 
         // Shell_NotifyIcon (called above, inside the Icon setter) copies the
         // icon for its own use, so the handle we just swapped out is safe to
@@ -217,37 +239,18 @@ internal sealed class TrayApp : ApplicationContext
     {
         if (reading is not { } r) return "mouse not responding";
 
-        var parts = new List<string> { $"{r.Percent}%" };
-        if (r.Wired) parts.Add("wired");
-        parts.Add($"{r.Millivolts / 1000.0:F2} V");
-        return string.Join("  ", parts);
+        var voltage = $"{r.Millivolts / 1000.0:F2} V";
+        return r.Wired
+            ? $"{r.Percent}%  wired  {voltage}"
+            : $"{r.Percent}%  {voltage}";
     }
-
-    static string Truncate(string text) => text.Length <= 63 ? text : text[..63];
 
     // --- user interaction ------------------------------------------------
 
     void OnMenuOpening(object? sender, CancelEventArgs e)
     {
-        var menu = (ContextMenuStrip)sender!;
-        menu.Items.Clear();
-
-        menu.Items.Add(new ToolStripMenuItem(StatusLine(_reading)) { Enabled = false });
-        menu.Items.Add(new ToolStripSeparator());
-
-        var refreshItem = new ToolStripMenuItem("Refresh now");
-        refreshItem.Click += async (_, _) => await RefreshAsync();
-        menu.Items.Add(refreshItem);
-
-        var startupItem = new ToolStripMenuItem("Start with Windows") { Checked = IsStartupEnabled() };
-        startupItem.Click += (_, _) => SetStartupEnabled(!IsStartupEnabled());
-        menu.Items.Add(startupItem);
-
-        menu.Items.Add(new ToolStripSeparator());
-
-        var exitItem = new ToolStripMenuItem("Exit");
-        exitItem.Click += (_, _) => ExitApp();
-        menu.Items.Add(exitItem);
+        _statusItem.Text = StatusLine(_reading);
+        _startupItem.Checked = IsStartupEnabled();
     }
 
     void ExitApp()
@@ -266,6 +269,7 @@ internal sealed class TrayApp : ApplicationContext
         {
             _pollTimer.Dispose();
             _notifyIcon.Dispose();
+            _menu.Dispose();
             if (_iconHandle != IntPtr.Zero)
             {
                 DestroyIcon(_iconHandle);
@@ -279,8 +283,12 @@ internal sealed class TrayApp : ApplicationContext
 
     static bool IsStartupEnabled()
     {
+        var command = StartupCommand();
+        if (command is null) return false;
+
         using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath);
-        return key?.GetValue(RunValueName) is not null;
+        return string.Equals(key?.GetValue(RunValueName) as string, command,
+                             StringComparison.OrdinalIgnoreCase);
     }
 
     static void SetStartupEnabled(bool enable)
@@ -292,9 +300,15 @@ internal sealed class TrayApp : ApplicationContext
             return;
         }
 
+        var command = StartupCommand()
+            ?? throw new InvalidOperationException("The executable path is unavailable.");
         using var writableKey = Registry.CurrentUser.CreateSubKey(RunKeyPath);
-        writableKey.SetValue(RunValueName, $"\"{Environment.ProcessPath}\"");
+        writableKey.SetValue(RunValueName, command);
     }
+
+    static string? StartupCommand() => Environment.ProcessPath is { } path
+        ? $"\"{path}\""
+        : null;
 
     [DllImport("user32.dll")]
     static extern bool DestroyIcon(IntPtr handle);

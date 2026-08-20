@@ -32,7 +32,7 @@ jobs:
           dotnet publish OP1wBattery.csproj
           --configuration Release
           --runtime win-x64
-          --self-contained true
+          --self-contained false
           --no-restore
           -p:PublishSingleFile=true
           --output publish
@@ -45,4 +45,5 @@ jobs:
           "publish/OP1wBattery.exe"
           --target "${{ github.sha }}"
           --title "OP1w Battery v0.0.${{ github.run_number }}"
+          --notes "This smaller build requires the .NET 10 Desktop Runtime for Windows. The runtime is not included."
           --generate-notes

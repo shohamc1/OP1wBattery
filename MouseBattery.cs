@@ -4,7 +4,7 @@ using Microsoft.Win32.SafeHandles;
 namespace OP1wBattery;
 
 /// <summary>A single battery reading from the mouse.</summary>
-public readonly record struct Reading(int Percent, int Millivolts, bool Wired);
+internal readonly record struct Reading(int Percent, int Millivolts, bool Wired);
 
 /// <summary>
 /// Battery readout for the Endgame Gear OP1w 4k v2 over raw HID.
@@ -26,7 +26,7 @@ public readonly record struct Reading(int Percent, int Millivolts, bool Wired);
 ///   cmd 0x0D    dongle firmware version at payload[1..2]
 ///   cmd 0x0E    mouse firmware version at payload[7..8], mouse PID at [2..3]
 /// </summary>
-public static class MouseBattery
+internal static class MouseBattery
 {
     const ushort VendorId = 0x3367;
     const ushort DonglePid = 0x1970;
@@ -40,9 +40,7 @@ public static class MouseBattery
     const byte StatusReady = 1;
     const byte StatusBusy = 3;
 
-    public const byte CommandBattery = 0xB4;
-    public const byte CommandDongleVersion = 0x0D;
-    public const byte CommandMouseVersion = 0x0E;
+    const byte CommandBattery = 0xB4;
 
     const uint GenericReadWrite = 0xC0000000;
     const uint ShareReadWrite = 3;
@@ -67,8 +65,8 @@ public static class MouseBattery
     }
 
     /// <summary>Send a vendor command and return its payload, or null on failure.</summary>
-    public static byte[]? SendCommand(SafeFileHandle handle, byte command,
-                                      int settleMs = 350, int retries = 3)
+    static byte[]? SendCommand(SafeFileHandle handle, byte command,
+                               int settleMs = 350, int retries = 3)
     {
         var request = new byte[ReportLength];
         request[0] = ReportId;
@@ -94,7 +92,7 @@ public static class MouseBattery
     }
 
     /// <summary>Open the vendor control interface, or null if it is not present.</summary>
-    public static (SafeFileHandle Handle, ushort ProductId)? OpenControlInterface()
+    static (SafeFileHandle Handle, ushort ProductId)? OpenControlInterface()
     {
         foreach (var path in HidInterfacePaths())
         {
