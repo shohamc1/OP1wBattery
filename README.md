@@ -8,6 +8,8 @@ the mouse over raw HID using the protocol reverse-engineered from that tool,
 documented in the doc comment on `MouseBattery`. A .NET 10 WinForms app with no
 third-party dependencies.
 
+![The tray icon showing 40%, with its hover tooltip](docs/screenshot.png)
+
 ## Features
 
 - The battery percentage is drawn onto the tray icon itself, so the level is
