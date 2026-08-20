@@ -9,7 +9,7 @@ internal static class Program
         // are per user and per session, so a machine-wide Global\ mutex would
         // be wrong. The using keeps the mutex alive (and owned) until Main
         // exits; a released or collected mutex would let a second instance in.
-        Mutex instanceMutex;
+        Mutex? instanceMutex = null;
         try
         {
             instanceMutex = new Mutex(true, @"Local\OP1wBatteryTrayMutex", out var isFirstInstance);
@@ -24,6 +24,14 @@ internal static class Program
             // The mutex exists but is owned by another session: treat that as
             // "already running" and leave quietly.
             return;
+        }
+        catch (WaitHandleCannotBeOpenedException ex)
+        {
+            // A kernel object of some other type already holds the name, so the
+            // single-instance check is unavailable. Start anyway: running twice
+            // is a far better failure than silently refusing to start, which
+            // looks to the user like nothing happened at all.
+            DebugLog.Write($"single-instance check unavailable: {ex.Message}");
         }
 
         using (instanceMutex)

@@ -19,6 +19,7 @@ internal sealed class TrayApp : ApplicationContext
     const int PollSecondsLow = 120;  // polling interval while the battery is low
     const int LowPollPercent = 15;   // poll faster at or below this level
     const float MinimumFontSize = 5f;
+    const int MaxTooltipLength = 63; // NotifyIcon.Text throws above this
 
     const string AppName = "OP1w Battery";
     const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
@@ -122,10 +123,11 @@ internal sealed class TrayApp : ApplicationContext
         {
             OnReadingUpdated();
         }
-        catch
+        catch (Exception ex)
         {
             // Rendering or the shell failing must not stop the poll loop, so the
             // timer is rescheduled below whatever happened above.
+            DebugLog.Write($"update failed: {ex.GetType().Name}: {ex.Message}");
             RescheduleTimer();
         }
     }
@@ -184,7 +186,7 @@ internal sealed class TrayApp : ApplicationContext
             throw;
         }
         _iconHandle = handle;
-        _notifyIcon.Text = $"{AppName}\n{StatusLine(_reading)}";
+        _notifyIcon.Text = TooltipFor(_reading);
 
         // Shell_NotifyIcon (called above, inside the Icon setter) copies the
         // icon for its own use, so the handle we just swapped out is safe to
@@ -264,6 +266,18 @@ internal sealed class TrayApp : ApplicationContext
     /// <summary>The level colour for a percentage; pure, so tests can hit it.</summary>
     internal static int ColorForPercent(int percent) =>
         LevelColors.First(level => percent <= level.Limit).Rgb;
+
+    /// <summary>
+    /// The tray tooltip. NotifyIcon.Text throws an ArgumentOutOfRangeException
+    /// above 63 characters, and the setter is reached from a poll rather than
+    /// from user input, so the length is clamped rather than trusted. Pure, so
+    /// tests can hit it.
+    /// </summary>
+    internal static string TooltipFor(Reading? reading)
+    {
+        var text = $"{AppName}\n{StatusLine(reading)}";
+        return text.Length <= MaxTooltipLength ? text : text[..MaxTooltipLength];
+    }
 
     static string StatusLine(Reading? reading)
     {
