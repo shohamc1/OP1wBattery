@@ -1,8 +1,7 @@
 using System.ComponentModel;
 using System.Drawing.Text;
 using System.Runtime.InteropServices;
-using System.Security;
-using Microsoft.Win32;
+using System.Text;
 
 namespace OP1wBattery;
 
@@ -22,8 +21,7 @@ internal sealed class TrayApp : ApplicationContext
     const int MaxTooltipLength = 127; // NotifyIcon.Text throws above this (szTip is 128 WCHARs)
 
     const string AppName = "OP1w Battery";
-    const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
-    const string RunValueName = "OP1wBatteryTray";
+    const string ShortcutName = "OP1w Battery.lnk";
 
     // "at or below this level, use this colour", evaluated lowest first.
     static readonly (int Limit, int Rgb)[] LevelColors =
@@ -325,15 +323,7 @@ internal sealed class TrayApp : ApplicationContext
     void OnMenuOpening(object? sender, CancelEventArgs e)
     {
         _statusItem.Text = StatusLine(_reading);
-        try
-        {
-            _startupItem.Checked = IsStartupEnabled();
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or SecurityException)
-        {
-            // A locked-down Run key must not break the menu; leave the
-            // checkbox showing whatever it showed last time.
-        }
+        _startupItem.Checked = IsStartupEnabled();
     }
 
     void ToggleStartup()
@@ -343,9 +333,9 @@ internal sealed class TrayApp : ApplicationContext
             SetStartupEnabled(!IsStartupEnabled());
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException
-                                   or SecurityException or InvalidOperationException)
+                                   or InvalidOperationException or COMException)
         {
-            MessageBox.Show($"Could not update the Run key:\n{ex.Message}", AppName,
+            MessageBox.Show($"Could not update the startup shortcut:\n{ex.Message}", AppName,
                             MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
@@ -379,35 +369,95 @@ internal sealed class TrayApp : ApplicationContext
     }
 
     // --- start with Windows ------------------------------------------------
+    //
+    // A shortcut in the Startup folder rather than an HKCU Run value: Windows
+    // leaves a Run value of ours out of the startup inventory it keeps under
+    // StartupApproved, so it shows in neither Task Manager nor Settings, and
+    // Explorer does not launch it at logon. A shortcut is inventoried and run.
 
-    static bool IsStartupEnabled()
+    /// <summary>
+    /// Our shortcut in the per-user Startup folder, or null if the shell cannot
+    /// name that folder.
+    /// </summary>
+    static string? ShortcutPath()
     {
-        var command = StartupCommand();
-        if (command is null) return false;
-
-        using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath);
-        return string.Equals(key?.GetValue(RunValueName) as string, command,
-                             StringComparison.OrdinalIgnoreCase);
+        var folder = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
+        return string.IsNullOrEmpty(folder) ? null : Path.Combine(folder, ShortcutName);
     }
+
+    static bool IsStartupEnabled() => ShortcutPath() is { } path && File.Exists(path);
 
     static void SetStartupEnabled(bool enable)
     {
+        var shortcut = ShortcutPath()
+            ?? throw new InvalidOperationException("The Startup folder is unavailable.");
+
         if (!enable)
         {
-            using var key = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true);
-            key?.DeleteValue(RunValueName, throwOnMissingValue: false);
+            File.Delete(shortcut); // deleting nothing is not an error
             return;
         }
 
-        var command = StartupCommand()
+        var target = Environment.ProcessPath
             ?? throw new InvalidOperationException("The executable path is unavailable.");
-        using var writableKey = Registry.CurrentUser.CreateSubKey(RunKeyPath);
-        writableKey.SetValue(RunValueName, command);
+
+        var link = (IShellLinkW)new ShellLink();
+        try
+        {
+            link.SetPath(target);
+            link.SetWorkingDirectory(Path.GetDirectoryName(target) ?? string.Empty);
+            link.SetDescription(AppName);
+            ((IPersistFile)link).Save(shortcut, remember: true);
+        }
+        finally
+        {
+            Marshal.FinalReleaseComObject(link);
+        }
     }
 
-    static string? StartupCommand() => Environment.ProcessPath is { } path
-        ? $"\"{path}\""
-        : null;
+    [ComImport, Guid("00021401-0000-0000-C000-000000000046")]
+    class ShellLink;
+
+    [ComImport, Guid("000214F9-0000-0000-C000-000000000046"),
+     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IShellLinkW
+    {
+        // In vtable order, and complete: the unused members above SetPath still
+        // have to be declared, or the ones below them land on the wrong slot.
+        void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder file,
+                     int maxPath, IntPtr findData, uint flags);
+        void GetIDList(out IntPtr idList);
+        void SetIDList(IntPtr idList);
+        void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder name, int maxName);
+        void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string name);
+        void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder dir, int maxPath);
+        void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string dir);
+        void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder args, int maxPath);
+        void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string args);
+        void GetHotkey(out short hotkey);
+        void SetHotkey(short hotkey);
+        void GetShowCmd(out int showCmd);
+        void SetShowCmd(int showCmd);
+        void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder icon,
+                             int maxPath, out int index);
+        void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string icon, int index);
+        void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string relative, uint reserved);
+        void Resolve(IntPtr owner, uint flags);
+        void SetPath([MarshalAs(UnmanagedType.LPWStr)] string file);
+    }
+
+    [ComImport, Guid("0000010B-0000-0000-C000-000000000046"),
+     InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    interface IPersistFile
+    {
+        void GetClassID(out Guid classId); // inherited from IPersist
+        [PreserveSig] int IsDirty();
+        void Load([MarshalAs(UnmanagedType.LPWStr)] string file, uint mode);
+        void Save([MarshalAs(UnmanagedType.LPWStr)] string? file,
+                  [MarshalAs(UnmanagedType.Bool)] bool remember);
+        void SaveCompleted([MarshalAs(UnmanagedType.LPWStr)] string file);
+        void GetCurFile([MarshalAs(UnmanagedType.LPWStr)] out string file);
+    }
 
     [DllImport("user32.dll")]
     static extern bool DestroyIcon(IntPtr handle);
